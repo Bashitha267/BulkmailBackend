@@ -9,6 +9,7 @@ import templatesRoutes from './routes/templates.routes.js';
 import campaignsRoutes from './routes/campaigns.routes.js';
 import uploadsRoutes, { UPLOADS_DIR } from './routes/uploads.routes.js';
 import workspaceRoutes from './routes/workspace.routes.js';
+import { isMysqlConnected } from './config/mysql.js';
 
 const app = express();
 
@@ -56,6 +57,7 @@ app.get('/api/health', (_req, res) => {
   res.json({
     success: true,
     status: 'ok',
+    database: isMysqlConnected() ? 'mysql_connected' : 'json_fallback',
     environment: env.nodeEnv,
     uptime: Math.round(process.uptime()),
   });
