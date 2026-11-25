@@ -8,6 +8,20 @@ export default {
   version: '004_relational_core',
   name: 'Relational tables for contacts, groups, campaigns, recipients, events, settings',
   async up(db) {
+    // Old tables were created with the server's default collation. New tables use
+    // utf8mb4_unicode_ci (works on MySQL 5.7, 8 and MariaDB). Joins between tables
+    // with different collations fail, so convert the old ones to match first.
+    const [tables] = await db.query(
+      `SELECT TABLE_NAME, TABLE_COLLATION FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN
+         ('users','contacts','groups_list','templates','campaigns','media_assets','workspace_state','schema_migrations')`
+    );
+    for (const t of tables) {
+      if (t.TABLE_COLLATION !== 'utf8mb4_unicode_ci') {
+        await db.query(`ALTER TABLE \`${t.TABLE_NAME}\` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+      }
+    }
+
     // ---- users ---------------------------------------------------------------
     await addColumnIfMissing(db, 'users', 'status', "VARCHAR(20) NOT NULL DEFAULT 'active'");
     await addColumnIfMissing(db, 'users', 'last_login_at', 'DATETIME NULL');
