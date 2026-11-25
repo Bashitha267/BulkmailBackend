@@ -3,90 +3,100 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { env } from './config/env.js';
+import { isDbReady, getDbError } from './config/db.js';
+import { latestMigrationVersion } from './config/migrator.js';
+import { workerState } from './services/worker.service.js';
 import authRoutes from './routes/auth.routes.js';
 import contactsRoutes from './routes/contacts.routes.js';
+import groupsRoutes from './routes/groups.routes.js';
+import segmentsRoutes from './routes/segments.routes.js';
 import templatesRoutes from './routes/templates.routes.js';
 import campaignsRoutes from './routes/campaigns.routes.js';
-import uploadsRoutes, { UPLOADS_DIR } from './routes/uploads.routes.js';
-import workspaceRoutes from './routes/workspace.routes.js';
-import { isMysqlConnected } from './config/mysql.js';
+import automationsRoutes from './routes/automations.routes.js';
+import analyticsRoutes from './routes/analytics.routes.js';
+import settingsRoutes from './routes/settings.routes.js';
+import publicRoutes from './routes/public.routes.js';
+import trackingRoutes from './routes/tracking.routes.js';
+import webhookRoutes from './routes/webhooks.routes.js';
+import { uploadsApi, uploadsPublic } from './routes/uploads.routes.js';
 
 const app = express();
 
-// Trust Hostinger reverse proxy for accurate client IP & rate limiting
+// Hostinger puts a proxy in front of the app; trust it for client IPs and rate limits.
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
-
-app.use(
-  helmet({
-    // Allow uploaded email images to be loaded from frontend & email clients
-    crossOriginResourcePolicy: { policy: 'cross-origin' },
-  })
-);
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(compression());
+
+// Routes reached from emails and from AWS: no CORS, their own body parsing.
+app.use('/t', trackingRoutes);
+app.use('/uploads', uploadsPublic);
+app.use('/api/webhooks', webhookRoutes);
 
 app.use(
   cors({
-    origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (env.corsOrigins.includes('*') || env.corsOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error(`Origin ${origin} not allowed by CORS`));
+    origin(origin, cb) {
+      if (!origin || env.corsOrigins.includes('*') || env.corsOrigins.includes(origin.replace(/\/$/, ''))) return cb(null, true);
+      return cb(null, false); // browser blocks it; no 500 in our logs
     },
-    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    maxAge: 86400,
   })
 );
 
-app.use(express.json({ limit: '1mb' }));
+// Large enough for a 50,000-row CSV import.
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 
-// Serve uploaded email images publicly
-app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '7d' }));
-
-app.get('/', (_req, res) => {
-  res.json({
-    success: true,
-    service: 'bulkemail-backend',
-    status: 'ok',
-  });
-});
+app.get('/', (_req, res) => res.json({ success: true, service: 'bulkemail-backend' }));
 
 app.get('/api/health', (_req, res) => {
-  res.json({
-    success: true,
-    status: 'ok',
-    database: isMysqlConnected() ? 'mysql_connected' : 'json_fallback',
+  const ok = isDbReady();
+  res.status(ok ? 200 : 503).json({
+    success: ok,
+    status: ok ? 'ok' : 'starting',
+    database: ok ? 'connected' : 'not_connected',
+    databaseError: ok ? undefined : getDbError(),
+    schema: latestMigrationVersion(),
+    worker: { running: workerState.running, lastTickAt: workerState.lastTickAt, holdReason: workerState.holdReason, lastError: workerState.lastError },
     environment: env.nodeEnv,
     uptime: Math.round(process.uptime()),
   });
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/public', publicRoutes);
 app.use('/api/contacts', contactsRoutes);
+app.use('/api/groups', groupsRoutes);
+app.use('/api/segments', segmentsRoutes);
 app.use('/api/templates', templatesRoutes);
 app.use('/api/campaigns', campaignsRoutes);
-app.use('/api/uploads', uploadsRoutes);
-app.use('/api', workspaceRoutes);
+app.use('/api/automations', automationsRoutes);
+app.use('/api/uploads', uploadsApi);
+app.use('/api', analyticsRoutes);
+app.use('/api', settingsRoutes);
 
-// 404 fallback
-app.use((_req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found',
-  });
-});
+app.use((_req, res) => res.status(404).json({ success: false, message: 'Route not found' }));
 
-// Centralized error handler
+// eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {
-  const status = err.status || 500;
+  let status = err.status || err.statusCode || 500;
+  let message = err.message;
+  if (err.type === 'entity.parse.failed') message = 'The request body is not valid JSON.';
+  if (err.type === 'entity.too.large') message = 'That is too much data for one request. Split the file into smaller parts.';
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    status = 400;
+    message = 'Images can be at most 5 MB.';
+  }
+  if (err.code === 'ER_DUP_ENTRY') {
+    status = 409;
+    message = 'That already exists.';
+  }
+  if (status >= 500) console.error('[error]', err);
   res.status(status).json({
     success: false,
-    message:
-      env.nodeEnv === 'production' && status === 500
-        ? 'Internal server error'
-        : err.message || 'Internal server error',
+    message: status >= 500 && env.isProduction ? 'Something went wrong on the server. Try again.' : message,
   });
 });
 

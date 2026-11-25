@@ -1,13 +1,15 @@
 {
   "name": "bulkemail-backend",
   "version": "1.0.0",
-  "description": "Hostinger hPanel optimized Node.js Express backend for Bulk Mailer",
+  "description": "Bulk Mailer API: Express + MySQL + Amazon SES, built for Hostinger Node.js hosting",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "migrate": "node src/config/runMigrationsCli.js"
+    "migrate": "node src/config/runMigrationsCli.js",
+    "seed:demo": "node src/seed/seedDemo.js",
+    "test": "node --test --test-concurrency=1 test/"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -23,7 +25,6 @@
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.5.0",
-    "mysql2": "^3.24.6",
-    "node-cron": "^4.6.0"
+    "mysql2": "^3.24.6"
   }
 }
