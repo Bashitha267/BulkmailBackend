@@ -3,120 +3,79 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import { env } from '../config/env.js';
-import { requireAuth } from '../middleware/auth.js';
-import { findMysqlUserByUsername, isMysqlConnected } from '../config/mysql.js';
+import { query, one } from '../config/db.js';
+import { requireAuth, requireDb, asyncRoute, serializeUser, httpError } from '../middleware/auth.js';
+import { usesDefaultPassword } from '../services/users.service.js';
+import { audit } from '../services/settings.service.js';
 
 const router = Router();
-
-// Pre-hashed password for 'password123' (cost 10) computed once at startup
-const DEMO_USER = {
-  id: 1,
-  username: 'demo',
-  passwordHash: bcrypt.hashSync('password123', 10),
-  name: 'Admin',
-  email: 'admin@example.com',
-  role: 'Owner',
-  initials: 'AD',
-  teamName: 'Acme Team',
-};
-
-/**
- * Lookup user by username.
- * Ready to be replaced with a MySQL query when database is connected.
- */
-async function findUserByUsername(username) {
-  if (isMysqlConnected()) {
-    const mysqlUser = await findMysqlUserByUsername(username);
-    if (mysqlUser) return mysqlUser;
-  }
-  if (username.toLowerCase() === DEMO_USER.username) {
-    return DEMO_USER;
-  }
-  return null;
-}
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    success: false,
-    message: 'Too many login attempts. Please try again in 15 minutes.',
-  },
+  message: { success: false, message: 'Too many sign-in attempts. Try again in 15 minutes.' },
 });
 
-router.post('/login', loginLimiter, async (req, res, next) => {
-  try {
+// Same work whether or not the user exists, so timing doesn't reveal usernames.
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10);
+
+router.post(
+  '/login',
+  loginLimiter,
+  requireDb,
+  asyncRoute(async (req, res) => {
     const { username, password } = req.body || {};
-
     if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Username and password are required.',
-      });
+      throw httpError(400, 'Enter your username and password.');
     }
+    const login = username.trim().toLowerCase();
+    const user = await one('SELECT * FROM users WHERE (username = ? OR LOWER(email) = ?) AND status = ? LIMIT 1', [
+      login,
+      login,
+      'active',
+    ]);
+    const valid = await bcrypt.compare(password, user?.password_hash || DUMMY_HASH);
+    if (!user || !valid) throw httpError(401, 'That username and password don’t match.');
 
-    const user = await findUserByUsername(username.trim());
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid username or password.',
-      });
+    await query('UPDATE users SET last_login_at = UTC_TIMESTAMP() WHERE id = ?', [user.id]);
+    const token = jwt.sign({ id: user.id }, env.jwtSecret, { expiresIn: env.jwtExpiresIn });
+    const safe = serializeUser(user);
+    res.json({ success: true, token, user: { ...safe, insecurePassword: await usesDefaultPassword(safe) } });
+  })
+);
+
+router.get(
+  '/me',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    res.json({ success: true, user: { ...req.user, insecurePassword: await usesDefaultPassword(req.user) } });
+  })
+);
+
+router.post(
+  '/change-password',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const { currentPassword, newPassword } = req.body || {};
+    if (typeof newPassword !== 'string' || newPassword.length < 10) {
+      throw httpError(400, 'Use at least 10 characters for the new password.');
     }
-
-    const isValid = await bcrypt.compare(password, user.passwordHash);
-    if (!isValid) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid username or password.',
-      });
+    const row = await one('SELECT password_hash FROM users WHERE id = ?', [req.user.id]);
+    if (!(await bcrypt.compare(String(currentPassword || ''), row.password_hash))) {
+      throw httpError(400, 'Your current password is not right.');
     }
+    await query('UPDATE users SET password_hash = ?, password_changed_at = UTC_TIMESTAMP() WHERE id = ?', [
+      await bcrypt.hash(newPassword, 12),
+      req.user.id,
+    ]);
+    await audit(req.user.name, 'changed their password');
+    const token = jwt.sign({ id: req.user.id }, env.jwtSecret, { expiresIn: env.jwtExpiresIn });
+    res.json({ success: true, token });
+  })
+);
 
-    const payload = {
-      id: user.id,
-      username: user.username,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      initials: user.initials,
-      teamName: user.teamName,
-    };
-
-    const token = jwt.sign(payload, env.jwtSecret, {
-      expiresIn: env.jwtExpiresIn,
-    });
-
-    return res.json({
-      success: true,
-      token,
-      user: payload,
-    });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-router.get('/me', requireAuth, (req, res) => {
-  return res.json({
-    success: true,
-    user: {
-      id: req.user.id,
-      username: req.user.username,
-      name: req.user.name,
-      email: req.user.email,
-      role: req.user.role,
-      initials: req.user.initials,
-      teamName: req.user.teamName,
-    },
-  });
-});
-
-router.post('/logout', (_req, res) => {
-  return res.json({
-    success: true,
-    message: 'Logged out successfully.',
-  });
-});
+router.post('/logout', (_req, res) => res.json({ success: true }));
 
 export default router;
