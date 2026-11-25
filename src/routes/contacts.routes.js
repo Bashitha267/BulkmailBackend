@@ -1,143 +1,458 @@
 import { Router } from 'express';
-import { db, saveStore } from '../data/store.js';
-import { requireAuth } from '../middleware/auth.js';
+import { query, one, tx } from '../config/db.js';
+import { requireAuth, editorsWrite, asyncRoute, httpError } from '../middleware/auth.js';
+import { chunk, initialsOf, isValidEmail, normalizeEmail, randomHex, slugify, splitName } from '../lib/util.js';
+import { serializeContact, groupsFor, recordContactEvent, setContactStatus } from '../services/contacts.service.js';
+import { compileSegment, serializeSegment } from '../services/segments.service.js';
+import { enrollOnGroupJoin } from '../services/automations.service.js';
+import { audit, getSettings, saveSetting } from '../services/settings.service.js';
 
 const router = Router();
-router.use(requireAuth);
+router.use(requireAuth, editorsWrite);
 
-router.get('/', (_req, res) => {
-  res.json({ success: true, contacts: db.contacts });
-});
+const STATUS_FILTERS = {
+  receivable: "c.status = 'Subscribed'",
+  unsubscribed: "c.status = 'Unsubscribed'",
+  bounced: "c.status = 'Bounced'",
+  complained: "c.status = 'Complained'",
+};
 
-router.post('/', (req, res) => {
-  const { name, email, city, plan, groups, consent } = req.body || {};
-  if (!name || !email) {
-    return res.status(400).json({ success: false, message: 'Name and email are required.' });
+async function buildFilter(q) {
+  const where = ['1 = 1'];
+  const params = [];
+  if (STATUS_FILTERS[q.status]) where.push(STATUS_FILTERS[q.status]);
+  if (q.q) {
+    const like = `%${String(q.q).trim().replace(/[%_\\]/g, '\\$&')}%`;
+    where.push('(c.name LIKE ? OR c.email LIKE ? OR c.city LIKE ?)');
+    params.push(like, like, like);
   }
-
-  const normalizedEmail = email.trim().toLowerCase();
-  if (db.contacts.some((c) => c.email.toLowerCase() === normalizedEmail)) {
-    return res.status(409).json({ success: false, message: 'A contact with this email already exists.' });
+  if (q.groupId) {
+    where.push('EXISTS (SELECT 1 FROM contact_groups g WHERE g.contact_id = c.id AND g.group_id = ?)');
+    params.push(String(q.groupId));
   }
-
-  const parts = name.trim().split(/\s+/);
-  const initials =
-    parts.length >= 2
-      ? `${parts[0][0]}${parts[1][0]}`.toUpperCase()
-      : name.trim().slice(0, 2).toUpperCase();
-
-  const newContact = {
-    id: `${normalizedEmail.replace(/[^a-z0-9]/g, '-')}-${Date.now()}`,
-    name: name.trim(),
-    initials,
-    email: email.trim(),
-    city: (city || 'Colombo').trim(),
-    plan: plan || 'Free',
-    groups: Array.isArray(groups) && groups.length > 0 ? groups : ['Newsletter'],
-    consent: consent || 'Manual entry',
-    consentDate: 'Today',
-    lastActivity: 'Added just now',
-    status: 'Subscribed',
-    stats: { received: 0, opened: 0, clicked: 0 },
-    activity: [
-      {
-        id: Date.now(),
-        type: 'group',
-        title: `Added to ${(groups || ['Newsletter']).join(', ')}`,
-        time: 'Just now',
-        category: 'Changes',
-      },
-    ],
-  };
-
-  db.contacts.unshift(newContact);
-  saveStore();
-
-  return res.status(201).json({ success: true, contact: newContact });
-});
-
-router.post('/import', (req, res) => {
-  const { contacts: incoming } = req.body || {};
-  if (!Array.isArray(incoming) || incoming.length === 0) {
-    return res.status(400).json({ success: false, message: 'No contacts provided for import.' });
-  }
-
-  const existingEmails = new Set(db.contacts.map((c) => c.email.toLowerCase()));
-  const inserted = [];
-
-  for (const item of incoming) {
-    if (!item.email) continue;
-    const lower = item.email.trim().toLowerCase();
-    if (existingEmails.has(lower)) continue;
-    existingEmails.add(lower);
-
-    const fullName = (item.name || item.email.split('@')[0]).trim();
-    const parts = fullName.split(/\s+/);
-    const initials =
-      parts.length >= 2
-        ? `${parts[0][0]}${parts[1][0]}`.toUpperCase()
-        : fullName.slice(0, 2).toUpperCase();
-
-    const contact = {
-      id: `${lower.replace(/[^a-z0-9]/g, '-')}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      name: fullName,
-      initials,
-      email: item.email.trim(),
-      city: item.city || '—',
-      plan: item.plan || 'Free',
-      groups: Array.isArray(item.groups) && item.groups.length > 0 ? item.groups : ['Newsletter'],
-      consent: item.consent || 'CSV import',
-      consentDate: item.consentDate || 'Today',
-      lastActivity: 'Imported just now',
-      status: 'Subscribed',
-      stats: { received: 0, opened: 0, clicked: 0 },
-      activity: [
-        {
-          id: Date.now(),
-          type: 'group',
-          title: 'Imported via CSV',
-          time: 'Just now',
-          category: 'Changes',
-        },
-      ],
-    };
-    inserted.push(contact);
-  }
-
-  db.contacts = [...inserted, ...db.contacts];
-  saveStore();
-
-  return res.status(201).json({
-    success: true,
-    importedCount: inserted.length,
-    contacts: inserted,
-  });
-});
-
-router.patch('/:id', (req, res) => {
-  const { id } = req.params;
-  const contact = db.contacts.find((c) => c.id === id);
-  if (!contact) {
-    return res.status(404).json({ success: false, message: 'Contact not found.' });
-  }
-
-  const allowed = ['name', 'email', 'city', 'plan', 'groups', 'status'];
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) {
-      contact[key] = req.body[key];
+  if (q.segmentId) {
+    const seg = await one('SELECT * FROM segments WHERE id = ?', [String(q.segmentId)]);
+    if (seg) {
+      const compiled = compileSegment(serializeSegment(seg));
+      where.push(compiled.sql);
+      params.push(...compiled.params);
     }
   }
+  return { sql: where.join(' AND '), params };
+}
 
-  if (req.body.name) {
-    const parts = req.body.name.trim().split(/\s+/);
-    contact.initials =
-      parts.length >= 2
-        ? `${parts[0][0]}${parts[1][0]}`.toUpperCase()
-        : req.body.name.trim().slice(0, 2).toUpperCase();
+export async function contactCounts() {
+  const [row] = await query(
+    `SELECT COUNT(*) AS total, SUM(status = 'Subscribed') AS receivable, SUM(status = 'Unsubscribed') AS unsubscribed,
+            SUM(status = 'Bounced') AS bounced, SUM(status = 'Complained') AS complained FROM contacts`
+  );
+  const [{ g }] = await query('SELECT (SELECT COUNT(*) FROM groups_list) + (SELECT COUNT(*) FROM segments) AS g');
+  return {
+    total: Number(row.total) || 0,
+    receivable: Number(row.receivable) || 0,
+    unsubscribed: Number(row.unsubscribed) || 0,
+    bounced: Number(row.bounced) || 0,
+    complained: Number(row.complained) || 0,
+    groupsAndSegments: Number(g) || 0,
+  };
+}
+
+router.get(
+  '/',
+  asyncRoute(async (req, res) => {
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const filter = await buildFilter(req.query);
+    const [{ n }] = await query(`SELECT COUNT(*) AS n FROM contacts c WHERE ${filter.sql}`, filter.params);
+    const rows = await query(
+      `SELECT c.* FROM contacts c WHERE ${filter.sql} ORDER BY c.created_at DESC, c.id LIMIT ? OFFSET ?`,
+      [...filter.params, pageSize, (page - 1) * pageSize]
+    );
+    const groups = await groupsFor(rows.map((r) => r.id));
+    res.json({
+      success: true,
+      contacts: rows.map((r) => serializeContact(r, groups.get(r.id))),
+      total: Number(n),
+      page,
+      pageSize,
+      counts: await contactCounts(),
+    });
+  })
+);
+
+router.get(
+  '/counts',
+  asyncRoute(async (_req, res) => res.json({ success: true, counts: await contactCounts() }))
+);
+
+function csvCell(v) {
+  const s = String(v ?? '');
+  // Leading = + - @ would run as a formula when opened in Excel.
+  const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
+router.get(
+  '/export.csv',
+  asyncRoute(async (req, res) => {
+    const filter = await buildFilter(req.query);
+    const settings = await getSettings();
+    const custom = settings.fields.filter((f) => !f.builtIn);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="contacts-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.write(
+      `${['Email', 'First name', 'Last name', 'City', 'Plan', ...custom.map((f) => f.name), 'Status', 'Groups', 'Consent source', 'Added']
+        .map(csvCell)
+        .join(',')}\n`
+    );
+    let offset = 0;
+    for (;;) {
+      const rows = await query(
+        `SELECT c.* FROM contacts c WHERE ${filter.sql} ORDER BY c.created_at, c.id LIMIT 1000 OFFSET ?`,
+        [...filter.params, offset]
+      );
+      if (!rows.length) break;
+      const groups = await groupsFor(rows.map((r) => r.id));
+      for (const r of rows) {
+        const c = serializeContact(r, groups.get(r.id));
+        res.write(
+          `${[
+            c.email,
+            c.firstName,
+            c.lastName,
+            c.city,
+            c.plan,
+            ...custom.map((f) => c.customFields[f.key] ?? ''),
+            c.status,
+            c.groups.map((g) => g.name).join('; '),
+            c.consent.source,
+            new Date(c.createdAt).toISOString().slice(0, 10),
+          ]
+            .map(csvCell)
+            .join(',')}\n`
+        );
+      }
+      offset += rows.length;
+    }
+    await audit(req.user.name, `exported ${offset} contacts`);
+    res.end();
+  })
+);
+
+router.get(
+  '/:id',
+  asyncRoute(async (req, res) => {
+    const row = await one('SELECT * FROM contacts WHERE id = ?', [req.params.id]);
+    if (!row) throw httpError(404, 'Contact not found.');
+    const groups = (await groupsFor([row.id])).get(row.id);
+    const events = await query(
+      `SELECT e.id, e.type, e.title, e.detail, e.created_at, e.campaign_id FROM events e
+       WHERE e.contact_id = ? ORDER BY e.created_at DESC, e.id DESC LIMIT 100`,
+      [row.id]
+    );
+    const segments = [];
+    for (const seg of (await query('SELECT * FROM segments ORDER BY name')).map(serializeSegment)) {
+      const compiled = compileSegment(seg);
+      const [hit] = await query(`SELECT 1 AS hit FROM contacts c WHERE c.id = ? AND ${compiled.sql}`, [row.id, ...compiled.params]);
+      if (hit) segments.push({ id: seg.id, name: seg.name });
+    }
+    res.json({
+      success: true,
+      contact: serializeContact(row, groups),
+      segments,
+      activity: events.map((e) => ({
+        id: e.id,
+        type: e.type,
+        title: e.title,
+        detail: e.detail,
+        at: e.created_at,
+        campaignId: e.campaign_id,
+      })),
+    });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Create / update
+// ---------------------------------------------------------------------------
+function cleanFields(input, settings) {
+  const out = {};
+  const allowed = new Set(settings.fields.filter((f) => !f.builtIn).map((f) => f.key));
+  for (const [k, v] of Object.entries(input || {})) {
+    if (allowed.has(k) && v !== undefined && v !== null) out[k] = String(v).slice(0, 255);
   }
+  return out;
+}
 
-  saveStore();
-  return res.json({ success: true, contact });
-});
+async function validGroupIds(ids) {
+  if (!Array.isArray(ids) || !ids.length) return [];
+  const rows = await query('SELECT id FROM groups_list WHERE id IN (?)', [ids.map(String)]);
+  return rows.map((r) => r.id);
+}
+
+export async function addToGroups(contactIds, groupIds, db = null) {
+  if (!contactIds.length || !groupIds.length) return;
+  const values = contactIds.flatMap((c) => groupIds.map((g) => [c, g]));
+  const q = db ? (s, p) => db.query(s, p) : query;
+  for (const part of chunk(values, 1000)) {
+    await q('INSERT IGNORE INTO contact_groups (contact_id, group_id) VALUES ?', [part]);
+  }
+}
+
+router.post(
+  '/',
+  asyncRoute(async (req, res) => {
+    const b = req.body || {};
+    const email = normalizeEmail(b.email);
+    if (!isValidEmail(email)) throw httpError(400, 'Enter a valid email address.');
+    if (await one('SELECT id FROM contacts WHERE email = ?', [email])) throw httpError(409, 'Someone with this email is already in your contacts.');
+    if (!b.consent?.confirmed) throw httpError(400, 'Confirm this person agreed to get emails from you.');
+
+    const settings = await getSettings();
+    const name = String(b.name || [b.firstName, b.lastName].filter(Boolean).join(' ') || email.split('@')[0]).trim().slice(0, 190);
+    const { first, last } = b.firstName !== undefined ? { first: b.firstName, last: b.lastName || '' } : splitName(name);
+    const id = `${slugify(email.split('@')[0], 40)}-${randomHex(4)}`;
+    const groupIds = await validGroupIds(b.groupIds);
+    const record = {
+      source: String(b.consent.source || 'Added by hand').slice(0, 120),
+      agreedTo: b.consent.agreedTo || 'Marketing email',
+      signedUp: b.consent.when || null,
+      addedBy: req.user.name,
+      addedAt: new Date().toISOString(),
+      doubleOptIn: false,
+    };
+
+    await query(
+      `INSERT INTO contacts (id, name, initials, email, city, plan, consent, consent_date, status, first_name, last_name,
+        custom_fields_json, consent_record_json, unsub_token, last_activity, last_activity_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Subscribed', ?, ?, ?, ?, ?, 'Added', UTC_TIMESTAMP())`,
+      [
+        id,
+        name,
+        initialsOf(name, email),
+        email,
+        String(b.city || '').slice(0, 100),
+        String(b.plan || '').slice(0, 40),
+        record.source,
+        new Date().toISOString().slice(0, 10),
+        String(first).slice(0, 120),
+        String(last).slice(0, 120),
+        JSON.stringify(cleanFields(b.customFields, settings)),
+        JSON.stringify(record),
+        randomHex(16),
+      ]
+    );
+    await addToGroups([id], groupIds);
+    await recordContactEvent(id, { type: 'added', title: `Added by ${req.user.name}`, detail: record.source });
+    await enrollOnGroupJoin([id], groupIds);
+    const row = await one('SELECT * FROM contacts WHERE id = ?', [id]);
+    res.status(201).json({ success: true, contact: serializeContact(row, (await groupsFor([id])).get(id)) });
+  })
+);
+
+/**
+ * CSV import. The browser parses and maps columns; this validates everything
+ * again, skips existing emails (never changing their status) and records consent.
+ */
+router.post(
+  '/import',
+  asyncRoute(async (req, res) => {
+    const { contacts: rows, groupIds: rawGroups, consent, newFields } = req.body || {};
+    if (!Array.isArray(rows) || rows.length === 0) throw httpError(400, 'The file has no rows to import.');
+    if (rows.length > 50000) throw httpError(400, 'Import at most 50,000 rows at a time.');
+    if (!consent?.confirmed) throw httpError(400, 'Confirm everyone in this file agreed to get emails from you.');
+    if (!consent.source) throw httpError(400, 'Say where these people signed up.');
+
+    let settings = await getSettings({ fresh: true });
+    if (Array.isArray(newFields) && newFields.length) {
+      const fields = [...settings.fields];
+      for (const f of newFields) {
+        const key = slugify(f.key || f.name).replace(/-/g, '_').slice(0, 40);
+        if (key && !fields.some((x) => x.key === key)) fields.push({ key, name: String(f.name || key).slice(0, 60), type: 'text' });
+      }
+      settings = await saveSetting('fields', fields);
+    }
+
+    const invalid = [];
+    const seen = new Set();
+    const clean = [];
+    rows.forEach((r, i) => {
+      const email = normalizeEmail(r.email);
+      if (!isValidEmail(email)) {
+        invalid.push({ row: i + 2, email: String(r.email || '').slice(0, 190) });
+        return;
+      }
+      if (seen.has(email)) return;
+      seen.add(email);
+      clean.push({ ...r, email });
+    });
+
+    const existing = new Set();
+    for (const part of chunk([...seen], 1000)) {
+      for (const r of await query('SELECT email FROM contacts WHERE email IN (?)', [part])) existing.add(r.email);
+    }
+    const fresh = clean.filter((r) => !existing.has(r.email));
+    const groupIds = await validGroupIds(rawGroups);
+    const record = JSON.stringify({
+      source: String(consent.source).slice(0, 120),
+      agreedTo: consent.agreedTo || 'Marketing email',
+      signedUp: consent.when || null,
+      importedBy: req.user.name,
+      importedAt: new Date().toISOString(),
+      doubleOptIn: false,
+    });
+
+    const ids = [];
+    await tx(async (conn) => {
+      for (const part of chunk(fresh, 500)) {
+        const values = part.map((r) => {
+          const name = String(r.name || [r.firstName, r.lastName].filter(Boolean).join(' ') || r.email.split('@')[0])
+            .trim()
+            .slice(0, 190);
+          const split = r.firstName !== undefined ? { first: r.firstName || '', last: r.lastName || '' } : splitName(name);
+          const id = `${slugify(r.email.split('@')[0], 40)}-${randomHex(4)}`;
+          ids.push(id);
+          return [
+            id,
+            name,
+            initialsOf(name, r.email),
+            r.email,
+            String(r.city || '').slice(0, 100),
+            String(r.plan || '').slice(0, 40),
+            String(consent.source).slice(0, 120),
+            String(consent.when || new Date().toISOString().slice(0, 10)).slice(0, 60),
+            'Subscribed',
+            String(split.first).slice(0, 120),
+            String(split.last).slice(0, 120),
+            JSON.stringify(cleanFields(r.customFields, settings)),
+            record,
+            randomHex(16),
+            'Imported',
+          ];
+        });
+        await conn.query(
+          `INSERT IGNORE INTO contacts (id, name, initials, email, city, plan, consent, consent_date, status,
+            first_name, last_name, custom_fields_json, consent_record_json, unsub_token, last_activity) VALUES ?`,
+          [values]
+        );
+      }
+      await addToGroups(ids, groupIds, conn);
+      for (const part of chunk(ids, 500)) {
+        await conn.query('INSERT INTO events (type, contact_id, title, detail) VALUES ?', [
+          part.map((id) => ['imported', id, `Imported by ${req.user.name}`, String(consent.source).slice(0, 120)]),
+        ]);
+      }
+    });
+    await enrollOnGroupJoin(ids, groupIds);
+    await audit(req.user.name, `imported ${ids.length} contacts`);
+
+    res.status(201).json({
+      success: true,
+      imported: ids.length,
+      duplicates: rows.length - invalid.length - ids.length,
+      invalid: invalid.length,
+      invalidRows: invalid.slice(0, 500),
+    });
+  })
+);
+
+router.patch(
+  '/:id',
+  asyncRoute(async (req, res) => {
+    const row = await one('SELECT * FROM contacts WHERE id = ?', [req.params.id]);
+    if (!row) throw httpError(404, 'Contact not found.');
+    const b = req.body || {};
+    const settings = await getSettings();
+    const sets = [];
+    const params = [];
+    const set = (col, val) => {
+      sets.push(`${col} = ?`);
+      params.push(val);
+    };
+
+    if (b.email !== undefined) {
+      const email = normalizeEmail(b.email);
+      if (!isValidEmail(email)) throw httpError(400, 'Enter a valid email address.');
+      if (email !== row.email && (await one('SELECT id FROM contacts WHERE email = ?', [email]))) {
+        throw httpError(409, 'Another contact already uses this email.');
+      }
+      set('email', email);
+    }
+    if (b.firstName !== undefined || b.lastName !== undefined || b.name !== undefined) {
+      const first = b.firstName ?? row.first_name;
+      const last = b.lastName ?? row.last_name;
+      const name = String(b.name || [first, last].filter(Boolean).join(' ') || row.name).slice(0, 190);
+      set('first_name', String(first).slice(0, 120));
+      set('last_name', String(last).slice(0, 120));
+      set('name', name);
+      set('initials', initialsOf(name, row.email));
+    }
+    if (b.city !== undefined) set('city', String(b.city).slice(0, 100));
+    if (b.plan !== undefined) set('plan', String(b.plan).slice(0, 40));
+    if (b.customFields !== undefined) set('custom_fields_json', JSON.stringify(cleanFields(b.customFields, settings)));
+    if (sets.length) await query(`UPDATE contacts SET ${sets.join(', ')} WHERE id = ?`, [...params, row.id]);
+
+    if (Array.isArray(b.groupIds)) {
+      const wanted = await validGroupIds(b.groupIds);
+      const current = (await query('SELECT group_id FROM contact_groups WHERE contact_id = ?', [row.id])).map((r) => r.group_id);
+      const added = wanted.filter((g) => !current.includes(g));
+      const removed = current.filter((g) => !wanted.includes(g));
+      if (removed.length) await query('DELETE FROM contact_groups WHERE contact_id = ? AND group_id IN (?)', [row.id, removed]);
+      await addToGroups([row.id], added);
+      if (added.length || removed.length) {
+        await recordContactEvent(row.id, { type: 'groups', title: `Groups changed by ${req.user.name}` });
+        await enrollOnGroupJoin([row.id], added);
+      }
+    }
+    const fresh = await one('SELECT * FROM contacts WHERE id = ?', [row.id]);
+    res.json({ success: true, contact: serializeContact(fresh, (await groupsFor([row.id])).get(row.id)) });
+  })
+);
+
+router.post(
+  '/:id/unsubscribe',
+  asyncRoute(async (req, res) => {
+    const row = await one('SELECT id, name FROM contacts WHERE id = ?', [req.params.id]);
+    if (!row) throw httpError(404, 'Contact not found.');
+    await setContactStatus(row.id, 'Unsubscribed', { reason: `By ${req.user.name}` });
+    await audit(req.user.name, `unsubscribed ${row.name}`);
+    res.json({ success: true });
+  })
+);
+
+router.post(
+  '/:id/resubscribe',
+  asyncRoute(async (req, res) => {
+    const row = await one('SELECT id, name, status FROM contacts WHERE id = ?', [req.params.id]);
+    if (!row) throw httpError(404, 'Contact not found.');
+    if (row.status === 'Complained') {
+      throw httpError(409, 'People who marked you as spam can’t be resubscribed by the team. They can sign up again themselves.');
+    }
+    if (!req.body?.confirmed) throw httpError(400, 'Confirm this person asked to hear from you again.');
+    await setContactStatus(row.id, 'Subscribed', { reason: `By ${req.user.name}` });
+    await audit(req.user.name, `resubscribed ${row.name}`);
+    res.json({ success: true });
+  })
+);
+
+router.delete(
+  '/:id',
+  asyncRoute(async (req, res) => {
+    const row = await one('SELECT id, name, email FROM contacts WHERE id = ?', [req.params.id]);
+    if (!row) throw httpError(404, 'Contact not found.');
+    await tx(async (conn) => {
+      await conn.query('DELETE FROM contact_groups WHERE contact_id = ?', [row.id]);
+      await conn.query('DELETE FROM events WHERE contact_id = ?', [row.id]);
+      await conn.query('DELETE FROM automation_runs WHERE contact_id = ?', [row.id]);
+      await conn.query(
+        "UPDATE campaign_recipients SET status = IF(status IN ('pending','held'), 'skipped', status), contact_id = NULL WHERE contact_id = ?",
+        [row.id]
+      );
+      await conn.query('DELETE FROM contacts WHERE id = ?', [row.id]);
+    });
+    await audit(req.user.name, `deleted contact ${row.email}`);
+    res.json({ success: true });
+  })
+);
 
 export default router;

@@ -1,22 +1,18 @@
 import bcrypt from 'bcryptjs';
+import { addColumnIfMissing } from './helpers.js';
+import m004 from './004_relational_core.js';
+import m005 from './005_import_legacy_workspace.js';
+
+export { addColumnIfMissing };
 
 /**
- * Helper to safely add a column on MySQL 5.7 / 8.0 / MariaDB (Hostinger compatible).
- */
-export async function addColumnIfMissing(pool, tableName, columnName, columnDefinition) {
-  const [cols] = await pool.query(
-    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`,
-    [tableName, columnName]
-  );
-  if (cols.length === 0) {
-    await pool.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDefinition}`);
-  }
-}
-
-/**
- * Ordered list of database migrations.
- * To add a new DB change on future deploys, append a new entry with a unique `version`.
+ * Ordered list of database migrations. They run automatically on every start.
+ *
+ * Rules for adding a change:
+ *  1. Append a new entry with the next version number. Never edit or reorder an
+ *     entry that has already been deployed.
+ *  2. Make each step safe to re-run (IF NOT EXISTS, addColumnIfMissing, ...),
+ *     because MySQL commits DDL immediately and a deploy can be interrupted.
  */
 export const migrations = [
   {
@@ -156,4 +152,6 @@ export const migrations = [
       `);
     },
   },
+  m004,
+  m005,
 ];

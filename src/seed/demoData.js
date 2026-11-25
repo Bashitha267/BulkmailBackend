@@ -1,13 +1,5 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { initMysql, persistWorkspaceToMysql } from '../config/mysql.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.resolve(__dirname, '../../data');
-const DB_PATH = path.join(DATA_DIR, 'db.json');
-
-const SEED_DATA = {
+// Sample workspace used by `npm run seed:demo`. Never loaded automatically.
+export const DEMO_DATA = {
   contacts: [
     {
       id: 'ravi-herath',
@@ -370,36 +362,3 @@ const SEED_DATA = {
     ],
   },
 };
-
-function loadStore() {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const raw = fs.readFileSync(DB_PATH, 'utf8');
-      return JSON.parse(raw);
-    }
-  } catch (err) {
-    console.warn('[store] Failed to read db.json, seeding defaults:', err.message);
-  }
-  return structuredClone(SEED_DATA);
-}
-
-export const db = loadStore();
-
-export async function hydrateFromMysql() {
-  const mysqlData = await initMysql(SEED_DATA);
-  if (mysqlData) {
-    Object.assign(db, mysqlData);
-  }
-}
-
-export function saveStore() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.warn('[store] Failed to persist db.json:', err.message);
-  }
-  persistWorkspaceToMysql(db);
-}
