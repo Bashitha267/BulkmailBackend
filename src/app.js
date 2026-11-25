@@ -4,6 +4,11 @@ import helmet from 'helmet';
 import compression from 'compression';
 import { env } from './config/env.js';
 import authRoutes from './routes/auth.routes.js';
+import contactsRoutes from './routes/contacts.routes.js';
+import templatesRoutes from './routes/templates.routes.js';
+import campaignsRoutes from './routes/campaigns.routes.js';
+import uploadsRoutes, { UPLOADS_DIR } from './routes/uploads.routes.js';
+import workspaceRoutes from './routes/workspace.routes.js';
 
 const app = express();
 
@@ -11,13 +16,17 @@ const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-app.use(helmet());
+app.use(
+  helmet({
+    // Allow uploaded email images to be loaded from frontend & email clients
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
 app.use(compression());
 
 app.use(
   cors({
     origin(origin, callback) {
-      // Allow same-origin / server-to-server / curl requests without Origin header
       if (!origin) return callback(null, true);
       if (env.corsOrigins.includes('*') || env.corsOrigins.includes(origin)) {
         return callback(null, true);
@@ -30,7 +39,10 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: '100kb' }));
+app.use(express.json({ limit: '1mb' }));
+
+// Serve uploaded email images publicly
+app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '7d' }));
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -42,6 +54,11 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/contacts', contactsRoutes);
+app.use('/api/templates', templatesRoutes);
+app.use('/api/campaigns', campaignsRoutes);
+app.use('/api/uploads', uploadsRoutes);
+app.use('/api', workspaceRoutes);
 
 // 404 fallback
 app.use((_req, res) => {
@@ -56,9 +73,10 @@ app.use((err, _req, res, _next) => {
   const status = err.status || 500;
   res.status(status).json({
     success: false,
-    message: env.nodeEnv === 'production' && status === 500
-      ? 'Internal server error'
-      : err.message || 'Internal server error',
+    message:
+      env.nodeEnv === 'production' && status === 500
+        ? 'Internal server error'
+        : err.message || 'Internal server error',
   });
 });
 

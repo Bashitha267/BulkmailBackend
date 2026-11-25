@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import { env } from '../config/env.js';
 import { requireAuth } from '../middleware/auth.js';
+import { findMysqlUserByUsername, isMysqlConnected } from '../config/mysql.js';
 
 const router = Router();
 
@@ -24,6 +25,10 @@ const DEMO_USER = {
  * Ready to be replaced with a MySQL query when database is connected.
  */
 async function findUserByUsername(username) {
+  if (isMysqlConnected()) {
+    const mysqlUser = await findMysqlUserByUsername(username);
+    if (mysqlUser) return mysqlUser;
+  }
   if (username.toLowerCase() === DEMO_USER.username) {
     return DEMO_USER;
   }

@@ -11,6 +11,13 @@ export const env = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   corsOrigins: rawOrigins.split(',').map((o) => o.trim()).filter(Boolean),
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || `http://localhost:${Number(process.env.PORT) || 5000}`).replace(/\/$/, ''),
+  db: {
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: Number(process.env.DB_PORT) || 3306,
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'bulk_mailer',
+  },
   aws: {
     region: process.env.AWS_REGION || 'ap-south-1',
     accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',

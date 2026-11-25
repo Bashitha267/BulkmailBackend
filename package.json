@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "migrate": "node src/config/runMigrationsCli.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -22,6 +23,7 @@
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.5.0",
+    "mysql2": "^3.24.6",
     "node-cron": "^4.6.0"
   }
 }

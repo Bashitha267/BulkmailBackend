@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { initMysql, persistWorkspaceToMysql } from '../config/mysql.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '../../data');
@@ -384,6 +385,13 @@ function loadStore() {
 
 export const db = loadStore();
 
+export async function hydrateFromMysql() {
+  const mysqlData = await initMysql(SEED_DATA);
+  if (mysqlData) {
+    Object.assign(db, mysqlData);
+  }
+}
+
 export function saveStore() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -393,4 +401,5 @@ export function saveStore() {
   } catch (err) {
     console.warn('[store] Failed to persist db.json:', err.message);
   }
+  persistWorkspaceToMysql(db);
 }
