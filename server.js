@@ -3,11 +3,14 @@ import { env } from './src/config/env.js';
 import { hydrateFromMysql } from './src/data/store.js';
 import { startEmailCron, stopEmailCron } from './src/services/queue.service.js';
 
-await hydrateFromMysql();
-
 const server = app.listen(env.port, () => {
   console.log(`[bulkemail-backend] Listening on port ${env.port} (${env.nodeEnv})`);
-  startEmailCron();
+  // Hydrate MySQL and start cron without blocking initial HTTP bind on Hostinger
+  hydrateFromMysql()
+    .catch((err) => console.warn('[startup] MySQL hydration warning:', err.message))
+    .finally(() => {
+      startEmailCron();
+    });
 });
 
 function shutdown(signal) {

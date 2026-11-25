@@ -22,6 +22,7 @@ export async function initMysql(seedData) {
         port: env.db.port,
         user: env.db.user,
         password: env.db.password,
+        connectTimeout: 4000,
       });
       await bootstrapConn.query(
         `CREATE DATABASE IF NOT EXISTS \`${env.db.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`

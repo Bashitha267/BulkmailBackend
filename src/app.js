@@ -44,6 +44,14 @@ app.use(express.json({ limit: '1mb' }));
 // Serve uploaded email images publicly
 app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '7d' }));
 
+app.get('/', (_req, res) => {
+  res.json({
+    success: true,
+    service: 'bulkemail-backend',
+    status: 'ok',
+  });
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({
     success: true,
