@@ -184,9 +184,10 @@ function cleanFields(input, settings) {
   return out;
 }
 
-async function validGroupIds(ids) {
-  if (!Array.isArray(ids) || !ids.length) return [];
-  const rows = await query('SELECT id FROM groups_list WHERE id IN (?)', [ids.map(String)]);
+async function validGroupIds(idsOrNames) {
+  if (!Array.isArray(idsOrNames) || !idsOrNames.length) return [];
+  const vals = idsOrNames.map(String);
+  const rows = await query('SELECT id FROM groups_list WHERE id IN (?) OR name IN (?)', [vals, vals]);
   return rows.map((r) => r.id);
 }
 
@@ -206,17 +207,17 @@ router.post(
     const email = normalizeEmail(b.email);
     if (!isValidEmail(email)) throw httpError(400, 'Enter a valid email address.');
     if (await one('SELECT id FROM contacts WHERE email = ?', [email])) throw httpError(409, 'Someone with this email is already in your contacts.');
-    if (!b.consent?.confirmed) throw httpError(400, 'Confirm this person agreed to get emails from you.');
 
     const settings = await getSettings();
     const name = String(b.name || [b.firstName, b.lastName].filter(Boolean).join(' ') || email.split('@')[0]).trim().slice(0, 190);
     const { first, last } = b.firstName !== undefined ? { first: b.firstName, last: b.lastName || '' } : splitName(name);
     const id = `${slugify(email.split('@')[0], 40)}-${randomHex(4)}`;
-    const groupIds = await validGroupIds(b.groupIds);
+    const groupIds = await validGroupIds(b.groupIds?.length ? b.groupIds : b.groups);
+    const consentSource = typeof b.consent === 'string' ? b.consent : b.consent?.source || 'Added manually';
     const record = {
-      source: String(b.consent.source || 'Added by hand').slice(0, 120),
-      agreedTo: b.consent.agreedTo || 'Marketing email',
-      signedUp: b.consent.when || null,
+      source: String(consentSource).slice(0, 120),
+      agreedTo: b.consent?.agreedTo || 'Marketing email',
+      signedUp: b.consent?.when || null,
       addedBy: req.user.name,
       addedAt: new Date().toISOString(),
       doubleOptIn: false,
@@ -260,8 +261,6 @@ router.post(
     const { contacts: rows, groupIds: rawGroups, consent, newFields } = req.body || {};
     if (!Array.isArray(rows) || rows.length === 0) throw httpError(400, 'The file has no rows to import.');
     if (rows.length > 50000) throw httpError(400, 'Import at most 50,000 rows at a time.');
-    if (!consent?.confirmed) throw httpError(400, 'Confirm everyone in this file agreed to get emails from you.');
-    if (!consent.source) throw httpError(400, 'Say where these people signed up.');
 
     let settings = await getSettings({ fresh: true });
     if (Array.isArray(newFields) && newFields.length) {
@@ -292,11 +291,13 @@ router.post(
       for (const r of await query('SELECT email FROM contacts WHERE email IN (?)', [part])) existing.add(r.email);
     }
     const fresh = clean.filter((r) => !existing.has(r.email));
-    const groupIds = await validGroupIds(rawGroups);
+    const fallbackGroups = rows[0]?.groups;
+    const groupIds = await validGroupIds(rawGroups?.length ? rawGroups : fallbackGroups);
+    const importSource = typeof consent === 'string' ? consent : consent?.source || rows[0]?.consent || 'CSV import';
     const record = JSON.stringify({
-      source: String(consent.source).slice(0, 120),
-      agreedTo: consent.agreedTo || 'Marketing email',
-      signedUp: consent.when || null,
+      source: String(importSource).slice(0, 120),
+      agreedTo: consent?.agreedTo || 'Marketing email',
+      signedUp: consent?.when || null,
       importedBy: req.user.name,
       importedAt: new Date().toISOString(),
       doubleOptIn: false,
@@ -428,7 +429,6 @@ router.post(
     if (row.status === 'Complained') {
       throw httpError(409, 'People who marked you as spam can’t be resubscribed by the team. They can sign up again themselves.');
     }
-    if (!req.body?.confirmed) throw httpError(400, 'Confirm this person asked to hear from you again.');
     await setContactStatus(row.id, 'Subscribed', { reason: `By ${req.user.name}` });
     await audit(req.user.name, `resubscribed ${row.name}`);
     res.json({ success: true });

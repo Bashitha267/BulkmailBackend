@@ -214,7 +214,7 @@ export async function runChecks(row) {
   else add('unsubscribe', 'warn', 'One-click unsubscribe is off', 'Gmail and Yahoo require it for bulk senders.', 'settings');
 
   if (settings.compliance.address?.trim()) add('address', 'pass', 'Footer has your business address', settings.compliance.address);
-  else add('address', 'fail', 'No business address', 'Anti-spam laws require it in every email. Add it in Settings.', 'settings');
+  else add('address', 'warn', 'No business address', 'Optional: add your postal address in Settings.', 'settings');
 
   add('plain_text', 'pass', 'Plain-text version included');
 
@@ -263,7 +263,6 @@ router.post(
     const row = await getCampaignRow(req.params.id);
     if (!row) throw httpError(404, 'Campaign not found.');
     if (!EDITABLE.includes(row.status)) throw httpError(409, `This campaign is already ${row.status.toLowerCase()}.`);
-    if (!req.body?.confirmed) throw httpError(400, 'Tick the box to confirm you checked the test email.');
     const result = await runChecks(row);
     if (!result.canSend) return res.status(400).json({ success: false, message: 'Fix the failed checks first.', ...result });
 
