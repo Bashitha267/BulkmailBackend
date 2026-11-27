@@ -1,5 +1,7 @@
 import { query, parseJson } from '../config/db.js';
+import { env } from '../config/env.js';
 import { DEFAULT_SETTINGS, SETTING_KEYS, WARMUP_SCHEDULE } from '../lib/defaults.js';
+import { isValidEmail, normalizeEmail } from '../lib/util.js';
 
 let cache = null;
 let cacheAt = 0;
@@ -20,6 +22,21 @@ export async function getSettings({ fresh = false } = {}) {
   // Built-in fields can't be deleted.
   for (const f of DEFAULT_SETTINGS.fields) {
     if (!out.fields.some((x) => x.key === f.key)) out.fields.unshift(f);
+  }
+  // Auto-populate default sender/fromName from .env when configured.
+  const envFromEmail = normalizeEmail(env.aws.fromEmail);
+  if (envFromEmail && isValidEmail(envFromEmail)) {
+    out.senders = Array.isArray(out.senders) ? out.senders.filter(Boolean) : [];
+    if (!out.senders.some((s) => normalizeEmail(s.email) === envFromEmail)) {
+      out.senders.unshift({
+        email: envFromEmail,
+        isDefault: !out.senders.some((s) => s.isDefault),
+        fromEnv: true,
+      });
+    }
+  }
+  if (!out.general.fromName && env.aws.fromName) {
+    out.general.fromName = env.aws.fromName;
   }
   cache = out;
   cacheAt = Date.now();

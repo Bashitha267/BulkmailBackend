@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { query, one, tx, parseJson } from '../config/db.js';
+import { env } from '../config/env.js';
 import { requireAuth, editorsWrite, asyncRoute, httpError } from '../middleware/auth.js';
 import { chunk, initialsOf, isValidEmail, normalizeEmail, randomHex, slugify, splitName } from '../lib/util.js';
 import { serializeContact, groupsFor, recordContactEvent, setContactStatus } from '../services/contacts.service.js';
@@ -452,8 +453,8 @@ router.post(
     }
 
     const defaultSender = settings.senders.find((s) => s.isDefault) || settings.senders[0];
-    const fromEmail = normalizeEmail(b.fromEmail || defaultSender?.email || '');
-    const fromName = String(b.fromName || settings.general.fromName || settings.general.teamName || '').trim().slice(0, 120);
+    const fromEmail = normalizeEmail(b.fromEmail || defaultSender?.email || env.aws.fromEmail || '');
+    const fromName = String(b.fromName || settings.general.fromName || env.aws.fromName || settings.general.teamName || '').trim().slice(0, 120);
     const replyTo = b.replyTo !== undefined ? normalizeEmail(b.replyTo) : normalizeEmail(settings.general.replyTo || '');
     if (!fromEmail || !isValidEmail(fromEmail)) {
       throw httpError(400, 'Choose a valid sender email in Settings first.');

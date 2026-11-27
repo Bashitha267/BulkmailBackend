@@ -52,7 +52,10 @@ router.get(
     );
     res.json({
       success: true,
-      settings,
+      settings: {
+        ...settings,
+        senders: await sendersWithStatus(settings),
+      },
       ses: {
         mode: isLive(settings) ? 'live' : 'simulation',
         modeReason: sesModeReason(settings),

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { query, one, parseJson } from '../config/db.js';
+import { env } from '../config/env.js';
 import { requireAuth, editorsWrite, asyncRoute, httpError } from '../middleware/auth.js';
 import { isValidEmail, isValidTimeZone, newId, normalizeEmail, zonedTimeToUtc } from '../lib/util.js';
 import {
@@ -105,8 +106,8 @@ router.post(
       day: '',
       title: 'Untitled campaign',
       status: 'Draft',
-      from_name: settings.general.fromName || settings.general.teamName,
-      from_email: defaultSender?.email || '',
+      from_name: settings.general.fromName || env.aws.fromName || settings.general.teamName,
+      from_email: defaultSender?.email || normalizeEmail(env.aws.fromEmail || ''),
       reply_to: settings.general.replyTo || '',
       created_by: req.user.name,
       timezone: 'Asia/Colombo',
@@ -532,7 +533,10 @@ router.post(
     const settings = await getSettings();
     const allowance = await sendingAllowance(settings);
     if (allowance.remaining < emails.length) throw httpError(429, 'You’ve reached today’s sending limit.');
-    if (!row.from_email) throw httpError(400, 'Choose a sender email first.');
+    const fallbackSender = settings.senders.find((s) => s.isDefault) || settings.senders[0];
+    const fromEmail = row.from_email || fallbackSender?.email || normalizeEmail(env.aws.fromEmail || '');
+    const fromName = row.from_name || settings.general.fromName || env.aws.fromName || settings.general.teamName;
+    if (!fromEmail) throw httpError(400, 'Choose a sender email first.');
 
     const tpl = row.template_id ? await one('SELECT * FROM templates WHERE id = ?', [row.template_id]) : null;
     const contact = await sampleContact(req.body?.asContactId);
@@ -548,7 +552,7 @@ router.post(
       });
       for (const to of emails) {
         try {
-          const r = await sendEmail({ settings, to, fromEmail: row.from_email, fromName: row.from_name, replyTo: row.reply_to, ...email });
+          const r = await sendEmail({ settings, to, fromEmail, fromName, replyTo: row.reply_to, ...email });
           await query('INSERT INTO test_sends (campaign_id, email, sent_by, simulated) VALUES (?, ?, ?, ?)', [row.id, to, req.user.name, r.simulated ? 1 : 0]);
           results.push({ to, variant, ok: true, simulated: r.simulated });
         } catch (err) {
