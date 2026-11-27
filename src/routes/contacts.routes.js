@@ -1,11 +1,14 @@
 import { Router } from 'express';
-import { query, one, tx } from '../config/db.js';
+import { query, one, tx, parseJson } from '../config/db.js';
 import { requireAuth, editorsWrite, asyncRoute, httpError } from '../middleware/auth.js';
 import { chunk, initialsOf, isValidEmail, normalizeEmail, randomHex, slugify, splitName } from '../lib/util.js';
 import { serializeContact, groupsFor, recordContactEvent, setContactStatus } from '../services/contacts.service.js';
 import { compileSegment, serializeSegment } from '../services/segments.service.js';
 import { enrollOnGroupJoin } from '../services/automations.service.js';
 import { audit, getSettings, saveSetting } from '../services/settings.service.js';
+import { renderEmail } from '../services/render.service.js';
+import { sendEmail } from '../services/ses.service.js';
+import { sendingAllowance } from '../services/worker.service.js';
 
 const router = Router();
 router.use(requireAuth, editorsWrite);
@@ -432,6 +435,87 @@ router.post(
     await setContactStatus(row.id, 'Subscribed', { reason: `By ${req.user.name}` });
     await audit(req.user.name, `resubscribed ${row.name}`);
     res.json({ success: true });
+  })
+);
+
+router.post(
+  '/:id/send-email',
+  asyncRoute(async (req, res) => {
+    const row = await one('SELECT * FROM contacts WHERE id = ?', [req.params.id]);
+    if (!row) throw httpError(404, 'Contact not found.');
+
+    const b = req.body || {};
+    const settings = await getSettings();
+    const allowance = await sendingAllowance(settings);
+    if (allowance.remaining < 1) {
+      throw httpError(429, 'You’ve reached today’s sending limit.');
+    }
+
+    const defaultSender = settings.senders.find((s) => s.isDefault) || settings.senders[0];
+    const fromEmail = normalizeEmail(b.fromEmail || defaultSender?.email || '');
+    const fromName = String(b.fromName || settings.general.fromName || settings.general.teamName || '').trim().slice(0, 120);
+    const replyTo = b.replyTo !== undefined ? normalizeEmail(b.replyTo) : normalizeEmail(settings.general.replyTo || '');
+    if (!fromEmail || !isValidEmail(fromEmail)) {
+      throw httpError(400, 'Choose a valid sender email in Settings first.');
+    }
+
+    let tpl = null;
+    if (b.templateId) {
+      tpl = await one('SELECT * FROM templates WHERE id = ?', [String(b.templateId)]);
+      if (!tpl) throw httpError(400, 'Selected template no longer exists.');
+    }
+
+    const subject = String(b.subject || tpl?.subject || '').trim().slice(0, 255);
+    if (!subject) throw httpError(400, 'Enter an email subject.');
+
+    const rawBody = String(b.body || '').trim();
+    let blocks = [];
+    if (tpl && !rawBody) {
+      blocks = parseJson(tpl.blocks_json, []) || [];
+    } else {
+      if (!rawBody) throw httpError(400, 'Write a message or choose a template.');
+      blocks = rawBody
+        .split(/\n{2,}/)
+        .map((chunkText) => chunkText.trim())
+        .filter(Boolean)
+        .map((chunkText) => ({ type: 'text', text: chunkText }));
+    }
+
+    const previewText = String(b.previewText ?? tpl?.preview_text ?? '').trim().slice(0, 255);
+    const contactObj = serializeContact(row);
+    const rendered = renderEmail({
+      blocks,
+      subject,
+      previewText,
+      contact: contactObj,
+      settings,
+      unsubToken: row.unsub_token,
+    });
+
+    const result = await sendEmail({
+      settings,
+      to: row.email,
+      fromName,
+      fromEmail,
+      replyTo,
+      ...rendered,
+    });
+
+    await query('UPDATE contacts SET sent_count = sent_count + 1 WHERE id = ?', [row.id]);
+    await recordContactEvent(row.id, {
+      type: 'sent',
+      title: `Sent email: ${rendered.subject}`,
+      detail: `From ${fromEmail}${result.simulated ? ' (simulated)' : ''}`,
+      activity: `Sent email: ${rendered.subject}`,
+    });
+    await audit(req.user.name, `sent direct email to ${row.email}`);
+
+    res.json({
+      success: true,
+      simulated: result.simulated,
+      messageId: result.messageId,
+      subject: rendered.subject,
+    });
   })
 );
 
