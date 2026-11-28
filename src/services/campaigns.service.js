@@ -121,7 +121,9 @@ export async function membershipSql({ groupIds = [], segmentIds = [], resendOf =
     parts.push('EXISTS (SELECT 1 FROM contact_groups g WHERE g.contact_id = c.id AND g.group_id IN (?))');
     params.push(groupIds);
   }
-  for (const seg of await loadSegments(segmentIds)) {
+  // The token 'all' means every contact (receivableSql still removes unsubscribed etc).
+  if (segmentIds.includes('all')) parts.push('1 = 1');
+  for (const seg of await loadSegments(segmentIds.filter((s) => s !== 'all'))) {
     const compiled = compileSegment({ ...seg, onlyReceivable: false });
     parts.push(compiled.sql);
     params.push(...compiled.params);

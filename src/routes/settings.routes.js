@@ -99,6 +99,9 @@ router.put(
     }
     if (b.ses) {
       const sendRate = Math.min(500, Math.max(1, parseInt(b.ses.sendRate ?? current.ses.sendRate, 10) || 10));
+      if (b.ses.simulation !== undefined && Boolean(b.ses.simulation) !== Boolean(current.ses.simulation)) {
+        await audit(req.user.name, `turned simulation mode ${b.ses.simulation ? 'on' : 'off'}`);
+      }
       const quota = await getSendQuota(current);
       if (quota?.maxRate && sendRate > quota.maxRate) throw httpError(400, `Your SES limit is ${quota.maxRate} a second.`);
       await saveSetting('ses', {

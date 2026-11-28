@@ -216,7 +216,11 @@ router.post(
     const name = String(b.name || [b.firstName, b.lastName].filter(Boolean).join(' ') || email.split('@')[0]).trim().slice(0, 190);
     const { first, last } = b.firstName !== undefined ? { first: b.firstName, last: b.lastName || '' } : splitName(name);
     const id = `${slugify(email.split('@')[0], 40)}-${randomHex(4)}`;
-    const groupIds = await validGroupIds(b.groupIds?.length ? b.groupIds : b.groups);
+    const wantedGroups = b.groupIds?.length ? b.groupIds : b.groups;
+    const groupIds = await validGroupIds(wantedGroups);
+    if (Array.isArray(wantedGroups) && wantedGroups.length && !groupIds.length) {
+      throw httpError(400, 'The selected group does not exist. Refresh and pick a group again.');
+    }
     const consentSource = typeof b.consent === 'string' ? b.consent : b.consent?.source || 'Added manually';
     const record = {
       source: String(consentSource).slice(0, 120),
@@ -324,8 +328,8 @@ router.post(
             r.email,
             String(r.city || '').slice(0, 100),
             String(r.plan || '').slice(0, 40),
-            String(consent.source).slice(0, 120),
-            String(consent.when || new Date().toISOString().slice(0, 10)).slice(0, 60),
+            String(importSource).slice(0, 120),
+            String(consent?.when || new Date().toISOString().slice(0, 10)).slice(0, 60),
             'Subscribed',
             String(split.first).slice(0, 120),
             String(split.last).slice(0, 120),
@@ -344,7 +348,7 @@ router.post(
       await addToGroups(ids, groupIds, conn);
       for (const part of chunk(ids, 500)) {
         await conn.query('INSERT INTO events (type, contact_id, title, detail) VALUES ?', [
-          part.map((id) => ['imported', id, `Imported by ${req.user.name}`, String(consent.source).slice(0, 120)]),
+          part.map((id) => ['imported', id, `Imported by ${req.user.name}`, String(importSource).slice(0, 120)]),
         ]);
       }
     });
